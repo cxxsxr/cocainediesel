@@ -50,7 +50,9 @@ if not is_macos_arm64 then
 	require( "libs.discord" )
 end
 require( "libs.dr_mp3" )
-require( "libs.freetype" )
+if not is_macos_arm64 then
+	require( "libs.freetype" )
+end
 require( "libs.gg" )
 require( "libs.glad" )
 require( "libs.imgui" )
@@ -93,7 +95,7 @@ do
 		"clay",
 		-- discord removed for ARM64
 		"dr_mp3",
-		"freetype",
+		-- freetype removed for ARM64
 		"ggentropy",
 		"ggformat",
 		"ggtime",
@@ -114,12 +116,13 @@ do
 		table.insert( client_libs, "sdl" )
 		table.insert( client_libs, "openal" )
 		table.insert( client_libs, "discord" )
+		table.insert( client_libs, "freetype" )
 	end
 
 	-- Base macOS linker flags, extended with Homebrew paths and dynamic libs for ARM64
 	local macos_ld = "-lcurl -framework AudioToolbox -framework Cocoa -framework CoreAudio -framework CoreHaptics -framework CoreVideo -framework IOKit -framework GameController -framework ForceFeedback -framework Carbon -framework UniformTypeIdentifiers -framework QuartzCore"
 	if is_macos_arm64 then
-		macos_ld = macos_ld .. " -L/opt/homebrew/lib -lSDL2 -lopenal"
+		macos_ld = macos_ld .. " -L/opt/homebrew/lib -lSDL2 -lopenal -lfreetype"
 	end
 
 	bin( "client", {
