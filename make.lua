@@ -32,6 +32,7 @@ end
 -- Native Apple Silicon flags and minimum deployment target
 if is_macos_arm64 then
 	gcc_global_cxxflags( "-arch arm64 -mmacosx-version-min=11.0" )
+	gcc_global_cxxflags( "-DDISCORD=0" )   -- <-- disable Discord flag
 end
 
 if config == "release" then
@@ -45,7 +46,9 @@ end
 require( "libs.cgltf" )
 require( "libs.clay" )
 require( "libs.curl" )
-require( "libs.discord" )
+if not is_macos_arm64 then
+	require( "libs.discord" )
+end
 require( "libs.dr_mp3" )
 require( "libs.freetype" )
 require( "libs.gg" )
@@ -88,7 +91,7 @@ do
 		"imgui",
 		"cgltf",
 		"clay",
-		"discord",
+		-- discord removed for ARM64
 		"dr_mp3",
 		"freetype",
 		"ggentropy",
@@ -110,6 +113,7 @@ do
 	if not is_macos_arm64 then
 		table.insert( client_libs, "sdl" )
 		table.insert( client_libs, "openal" )
+		table.insert( client_libs, "discord" )
 	end
 
 	-- Base macOS linker flags, extended with Homebrew paths and dynamic libs for ARM64
