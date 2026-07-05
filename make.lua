@@ -57,7 +57,10 @@ require( "libs.gg" )
 require( "libs.glad" )
 require( "libs.imgui" )
 require( "libs.jsmn" )
-require( "libs.luau" )
+-- Luau is now handled dynamically via Homebrew on ARM64 - skip the internal build script
+if not is_macos_arm64 then
+	require( "libs.luau" )
+end
 require( "libs.mbedtls" )
 require( "libs.meshoptimizer" )
 require( "libs.monocypher" )
@@ -101,7 +104,6 @@ do
 		"ggtime",
 		"glad",
 		"jsmn",
-		"luau",
 		"monocypher",
 		"picohttpparser",
 		"stb_image",
@@ -112,17 +114,21 @@ do
 		"zstd",
 		platform_curl_libs,
 	}
+	
 	if not is_macos_arm64 then
+		table.insert( client_libs, "luau" )
 		table.insert( client_libs, "sdl" )
 		table.insert( client_libs, "openal" )
 		table.insert( client_libs, "discord" )
 		table.insert( client_libs, "freetype" )
 	end
 
-	-- Base macOS linker flags, extended with Homebrew paths and dynamic libs for ARM64
+	-- Base macOS linker flags.
 	local macos_ld = "-lcurl -framework AudioToolbox -framework Cocoa -framework CoreAudio -framework CoreHaptics -framework CoreVideo -framework IOKit -framework GameController -framework ForceFeedback -framework Carbon -framework UniformTypeIdentifiers -framework QuartzCore"
+	
+	-- For ARM64, add Homebrew paths and link dynamically against SDL, OpenAL, and Luau.
 	if is_macos_arm64 then
-		macos_ld = macos_ld .. " -L/opt/homebrew/lib -lSDL2 -lopenal -lfreetype"
+		macos_ld = macos_ld .. " -L/opt/homebrew/lib -lSDL2 -lopenal -lfreetype -lLuau.Ast -lLuau.Compiler -lLuau.VM"
 	end
 
 	bin( "client", {
