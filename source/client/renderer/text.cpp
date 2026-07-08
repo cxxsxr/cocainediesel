@@ -16,6 +16,9 @@
 
 #include "stb/stb_image.h"
 
+#include <cstdio>
+#include <cstdlib>
+
 struct Font {
 	u32 path_hash;
 	Texture atlas;
@@ -36,68 +39,100 @@ void ShutdownText() {
 }
 
 const Font * RegisterFont( Span< const char > path ) {
-	TempAllocator temp = cls.frame_arena.temp();
+    TempAllocator temp = cls.frame_arena.temp();
 
-	u32 path_hash = Hash32( path );
-	for( const Font & font : fonts ) {
-		if( font.path_hash == path_hash ) {
-			return &font;
-		}
-	}
+    u32 path_hash = Hash32( path );
+    for( const Font & font : fonts ) {
+        if( font.path_hash == path_hash ) {
+            return &font;
+        }
+    }
 
-	Font font = { };
-	font.path_hash = path_hash;
+    Font font = { };
+    font.path_hash = path_hash;
 
-	// load MSDF spec
-	{
-		Span< const char > msdf_path = temp.sv( "{}.msdf", path );
-		Span< const char > data = AssetBinary( msdf_path ).cast< const char >();
-		if( data.ptr == NULL ) {
-			Com_GGPrint( S_COLOR_RED "Couldn't read file {}", msdf_path );
-			return NULL;
-		}
+    // Helper: read file, try multiple paths, return malloc'd data
+    auto read_file = [&](const char* base_path, const char* ext) -> Span<const char> {
+        char full_path[512];
+        // Try plain path
+        snprintf(full_path, sizeof(full_path), "%s%s", base_path, ext);
+        FILE* f = fopen(full_path, "rb");
+        if (!f) {
+            // Try with base/ prefix
+            snprintf(full_path, sizeof(full_path), "base/%s%s", base_path, ext);
+            f = fopen(full_path, "rb");
+        }
+        if (!f) {
+            // Try base/fonts/ (strip leading "fonts/")
+            const char* stripped = base_path;
+            if (strncmp(base_path, "fonts/", 6) == 0) stripped += 6;
+            snprintf(full_path, sizeof(full_path), "base/fonts/%s%s", stripped, ext);
+            f = fopen(full_path, "rb");
+        }
+        if (!f) {
+            return { };
+        }
+        fseek(f, 0, SEEK_END);
+        long size = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        char* data = (char*)malloc(size);
+        fread(data, 1, size, f);
+        fclose(f);
+        return Span<const char>(data, size);
+    };
 
-		if( !Deserialize( NULL, &font.metadata, data.ptr, data.n ) ) {
-			Com_GGPrint( S_COLOR_RED "Couldn't load MSDF spec from {}", msdf_path );
-			return NULL;
-		}
-	}
+    // load MSDF spec
+    {
+        Span<const char> msdf_data = read_file(path.ptr, ".msdf");
+        if( msdf_data.ptr == NULL ) {
+            Com_GGPrint( S_COLOR_RED "Couldn't read file {}.msdf", path );
+            return NULL;
+        }
+        defer { free( (void*)msdf_data.ptr ); };
 
-	// load MSDF atlas
-	// we need to load it ourselves because the normal texture loader treats 4 channel PNGs as sRGB
-	{
-		Span< const char > atlas_path = temp.sv( "{}.png", path );
-		Span< const u8 > data = AssetBinary( atlas_path );
+        if( !Deserialize( NULL, &font.metadata, msdf_data.ptr, msdf_data.n ) ) {
+            Com_GGPrint( S_COLOR_RED "Couldn't load MSDF spec from {}.msdf", path );
+            return NULL;
+        }
+    }
 
-		int w, h, channels;
-		u8 * pixels = stbi_load_from_memory( data.ptr, data.num_bytes(), &w, &h, &channels, 4 );
-		defer { stbi_image_free( pixels ); };
+    // load MSDF atlas
+    {
+        Span<const char> atlas_data = read_file(path.ptr, ".png");
+        if( atlas_data.ptr == NULL ) {
+            Com_GGPrint( S_COLOR_YELLOW "WARNING: couldn't load atlas from {}.png", path );
+            return NULL;
+        }
+        defer { free( (void*)atlas_data.ptr ); };
 
-		if( pixels == NULL || channels != 3 ) {
-			Com_GGPrint( S_COLOR_YELLOW "WARNING: couldn't load atlas from {}", path );
-			return NULL;
-		}
+        int w, h, channels;
+        u8 * pixels = stbi_load_from_memory( (const u8*)atlas_data.ptr, atlas_data.n, &w, &h, &channels, 4 );
+        defer { stbi_image_free( pixels ); };
 
-		font.atlas = NewTexture( TextureConfig {
-			.format = TextureFormat_RGBA_U8,
-			.width = checked_cast< u32 >( w ),
-			.height = checked_cast< u32 >( h ),
-			.data = pixels,
-		} );
-	}
+        if( pixels == NULL || channels != 4 ) {
+            Com_GGPrint( S_COLOR_YELLOW "WARNING: couldn't load atlas from {}.png", path );
+            return NULL;
+        }
 
-	// this is a little silly because Font has an internal pointer
-	Optional< Font * > slot = fonts.add();
-	if( !slot.exists ) {
-		Com_Printf( S_COLOR_YELLOW "Too many fonts\n" );
-		DeleteTexture( font.atlas );
-		return NULL;
-	}
+        font.atlas = NewTexture( TextureConfig {
+            .format = TextureFormat_RGBA_U8,
+            .width = checked_cast< u32 >( w ),
+            .height = checked_cast< u32 >( h ),
+            .data = pixels,
+        } );
+    }
 
-	*slot.value = font;
-	slot.value->material.texture = &slot.value->atlas;
+    Optional< Font * > slot = fonts.add();
+    if( !slot.exists ) {
+        Com_Printf( S_COLOR_YELLOW "Too many fonts\n" );
+        DeleteTexture( font.atlas );
+        return NULL;
+    }
 
-	return slot.value;
+    *slot.value = font;
+    slot.value->material.texture = &slot.value->atlas;
+
+    return slot.value;
 }
 
 static float Area( const MinMax2 & rect ) {
@@ -107,8 +142,7 @@ static float Area( const MinMax2 & rect ) {
 }
 
 void DrawTextBaseline( const Font * font, float pixel_size, Span< const char > str, float x, float y, Vec4 color, Optional< Vec4 > border_color ) {
-	if( font == NULL )
-		return;
+    if (font == NULL) return;
 
 	ImGuiShaderAndMaterial sam;
 	sam.shader = &shaders.text;
@@ -151,9 +185,9 @@ void DrawTextBaseline( const Font * font, float pixel_size, Span< const char > s
 }
 
 void DrawFittedText( const Font * font, Span< const char > str, MinMax2 bounds, XAlignment x_alignment, Vec4 color, Optional< Vec4 > border_color ) {
-	if ( str.num_bytes() == 0 ) {
-		return;
-	}
+    if (font == NULL || str.num_bytes() == 0) {
+        return;
+    }
 
 	MinMax2 text_bounds = TextVisualBounds( font, 1.0f, str );
 	float fitted_size = Min2( Width( bounds ) / Width( text_bounds ), Height( bounds ) / Height( text_bounds ) );
@@ -184,6 +218,7 @@ void DrawText( const Font * font, float pixel_size, const char * str, float x, f
 }
 
 MinMax2 TextVisualBounds( const Font * font, float pixel_size, Span< const char > str ) {
+    if (font == NULL) return MinMax2( Vec2( 0 ), Vec2( 0 ) );
 	float width = 0.0f;
 	MinMax1 y_extents = MinMax1::Empty();
 
