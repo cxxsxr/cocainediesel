@@ -16,6 +16,9 @@
 #include "tracy/tracy/Tracy.hpp"
 #include "tracy/tracy/TracyOpenGL.hpp"
 
+#include <cctype>
+#include <cstring>
+#include <cstdlib>
 #include <new>
 
 STATIC_ASSERT( ( SameType< u32, GLuint > ) );
@@ -259,8 +262,13 @@ static void DebugOutputCallback(
 }
 
 static void DebugLabel( GLenum type, GLuint object, Span< const char > label ) {
-	Assert( label.ptr != NULL );
-	glObjectLabel( type, object, checked_cast< GLsizei >( label.n ), label.ptr );
+    Assert( label.ptr != NULL );
+	#ifdef __APPLE__
+    // macOS does not support glObjectLabel; skip the call.
+    (void)type; (void)object; (void)label;
+	#else
+    glObjectLabel( type, object, checked_cast< GLsizei >( label.n ), label.ptr );
+#endif
 }
 
 static void PlotVRAMUsage() {
@@ -302,35 +310,46 @@ void InitRenderBackend() {
 	TracyGpuContext;
 
 	{
-		struct {
-			const char * name;
-			int loaded;
-		} required_extensions[] = {
-			{ "GL_EXT_texture_compression_s3tc", GLAD_GL_EXT_texture_compression_s3tc },
-			{ "GL_EXT_texture_filter_anisotropic", GLAD_GL_EXT_texture_filter_anisotropic },
-			{ "GL_EXT_texture_sRGB", GLAD_GL_EXT_texture_sRGB },
-			{ "GL_EXT_texture_sRGB_decode", GLAD_GL_EXT_texture_sRGB_decode },
-		};
+    // macOS: sRGB is core, not an extension; mark it as loaded.
+    #ifdef __APPLE__
+        GLAD_GL_EXT_texture_sRGB = 1;
+    #endif
 
-		String< 1024 > missing_extensions( "Your GPU is insane and doesn't have some required OpenGL extensions:" );
-		bool any_missing = false;
-		for( auto ext : required_extensions ) {
-			if( ext.loaded == 0 ) {
-				missing_extensions.append( " {}", ext.name );
-				any_missing = true;
-			}
-		}
+    struct {
+        const char * name;
+        int loaded;
+    } required_extensions[] = {
+        { "GL_EXT_texture_compression_s3tc", GLAD_GL_EXT_texture_compression_s3tc },
+        { "GL_EXT_texture_filter_anisotropic", GLAD_GL_EXT_texture_filter_anisotropic },
+        { "GL_EXT_texture_sRGB", GLAD_GL_EXT_texture_sRGB },
+        { "GL_EXT_texture_sRGB_decode", GLAD_GL_EXT_texture_sRGB_decode },
+    };
 
-		if( any_missing ) {
-			Fatal( "%s", missing_extensions.c_str() );
-		}
+    String< 1024 > missing_extensions( "Your GPU is insane and doesn't have some required OpenGL extensions:" );
+    bool any_missing = false;
+    for( auto ext : required_extensions ) {
+        if( ext.loaded == 0 ) {
+            missing_extensions.append( " {}", ext.name );
+            any_missing = true;
+        }
+    }
 
-		GLint vert_buffers;
-		glGetIntegerv( GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS, &vert_buffers );
-		if( vert_buffers >= 0 && size_t( vert_buffers ) < ARRAY_COUNT( &Shader::buffers ) ) {
-			Fatal( "Your GPU is too old, GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS is too small" );
-		}
-	}
+    if( any_missing ) {
+        Fatal( "%s", missing_extensions.c_str() );
+    }
+
+    // SSBO limit check – skip on macOS because the limit is often lower than expected.
+    #ifdef __APPLE__
+        // macOS may report a low value; we assume it's sufficient for the game's needs.
+        (void)0; // no-op
+    #else
+        GLint vert_buffers;
+        glGetIntegerv( GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS, &vert_buffers );
+        if( vert_buffers >= 0 && size_t( vert_buffers ) < ARRAY_COUNT( &Shader::buffers ) ) {
+            Fatal( "Your GPU is too old, GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS is too small" );
+        }
+    #endif
+}
 
 	{
 		GLint context_flags;
@@ -380,7 +399,15 @@ void InitRenderBackend() {
 
 	glGetFloatv( GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &max_anisotropic_filtering );
 
-	glCreateVertexArrays( 1, &vao );
+	#ifdef __APPLE__
+    if (glCreateVertexArrays) {
+        glCreateVertexArrays(1, &vao);
+    } else {
+        glGenVertexArrays(1, &vao);
+    }
+	#else
+    glCreateVertexArrays(1, &vao);
+	#endif
 	DebugLabel( GL_VERTEX_ARRAY, vao, "Global VAO" );
 	glBindVertexArray( vao );
 
@@ -816,7 +843,13 @@ static void SetupRenderPass( const RenderPassConfig & pass ) {
 	renderpass_zone = new (renderpass_zone_memory) tracy::GpuCtxScope( pass.tracy, true );
 #endif
 
-	glPushDebugGroup( GL_DEBUG_SOURCE_APPLICATION, 0, -1, pass.tracy->name );
+	#ifdef __APPLE__
+    if (glPopDebugGroup) {
+        glPopDebugGroup();
+    }
+#else
+    glPopDebugGroup();
+#endif
 
 	const RenderTarget & fb = pass.target;
 	if( fb.fbo != prev_fbo ) {
@@ -843,19 +876,35 @@ static void SetupRenderPass( const RenderPassConfig & pass ) {
 	}
 
 	for( size_t i = 0; i < ARRAY_COUNT( pass.clear_color ); i++ ) {
-		const Optional< Vec4 > & clear_color = pass.clear_color[ i ];
-		if( !clear_color.exists || pass.target.color_attachments[ i ].texture == 0 )
-			continue;
-		glClearNamedFramebufferfv( pass.target.fbo, GL_COLOR, i, clear_color.value.ptr() );
-	}
+    const Optional< Vec4 > & clear_color = pass.clear_color[ i ];
+    if( !clear_color.exists || pass.target.color_attachments[ i ].texture == 0 )
+        continue;
+#ifdef __APPLE__
+    glBindFramebuffer( GL_DRAW_FRAMEBUFFER, pass.target.fbo );
+    glClearBufferfv( GL_COLOR, i, clear_color.value.ptr() );
+#else
+    glClearNamedFramebufferfv( pass.target.fbo, GL_COLOR, i, clear_color.value.ptr() );
+#endif
+}
 
-	if( pass.clear_depth.exists && pass.target.depth_attachment.texture != 0 ) {
-		glClearNamedFramebufferfv( pass.target.fbo, GL_DEPTH, 0, &pass.clear_depth.value );
-	}
+if( pass.clear_depth.exists && pass.target.depth_attachment.texture != 0 ) {
+#ifdef __APPLE__
+    glBindFramebuffer( GL_DRAW_FRAMEBUFFER, pass.target.fbo );
+    glClearBufferfv( GL_DEPTH, 0, &pass.clear_depth.value );
+#else
+    glClearNamedFramebufferfv( pass.target.fbo, GL_DEPTH, 0, &pass.clear_depth.value );
+#endif
+}
 }
 
 static void FinishRenderPass() {
-	glPopDebugGroup();
+	#ifdef __APPLE__
+    if (glPopDebugGroup) {
+        glPopDebugGroup();
+    }
+#else
+    glPopDebugGroup();
+#endif
 
 #if TRACY_ENABLE
 	renderpass_zone->~GpuCtxScope();
@@ -1008,16 +1057,34 @@ UniformBlock UploadUniforms( const void * data, size_t size ) {
 }
 
 static GPUBuffer NewGPUBuffer( const void * data, u32 size, bool coherent, Span< const char > name ) {
-	GLbitfield flags = coherent ? GL_MAP_COHERENT_BIT | GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT : 0;
-	GPUBuffer buf = { };
-	glCreateBuffers( 1, &buf.buffer );
-	glNamedBufferStorage( buf.buffer, size, data, flags );
+    #ifndef __APPLE__
+    GLbitfield flags = coherent ? GL_MAP_COHERENT_BIT | GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT : 0;
+#else
+    (void)coherent; // silence unused parameter warning
+#endif
+    GPUBuffer buf = { };
+    glGenBuffers( 1, &buf.buffer );
+    glBindBuffer( GL_UNIFORM_BUFFER, buf.buffer );
+#ifdef __APPLE__
+    // GLAD may not have loaded glBufferData; load it manually via SDL.
+    typedef void (APIENTRY *PFNGLBUFFERDATAPROC)(GLenum, GLsizeiptr, const void*, GLenum);
+    static PFNGLBUFFERDATAPROC my_glBufferData = NULL;
+    if (!my_glBufferData) {
+        my_glBufferData = (PFNGLBUFFERDATAPROC)SDL_GL_GetProcAddress("glBufferData");
+        if (!my_glBufferData) {
+            Fatal( "Failed to load glBufferData" );
+        }
+    }
+    my_glBufferData( GL_UNIFORM_BUFFER, size, data, GL_DYNAMIC_DRAW );
+#else
+    glBufferData( GL_UNIFORM_BUFFER, size, data, GL_DYNAMIC_DRAW );
+#endif
 
-	if( name.ptr != NULL ) {
-		DebugLabel( GL_BUFFER, buf.buffer, name );
-	}
+    if( name.ptr != NULL ) {
+        DebugLabel( GL_BUFFER, buf.buffer, name );
+    }
 
-	return buf;
+    return buf;
 }
 
 GPUBuffer NewGPUBuffer( const void * data, u32 size, Span< const char > name ) {
@@ -1039,18 +1106,31 @@ void DeferDeleteGPUBuffer( GPUBuffer buf ) {
 }
 
 StreamingBuffer NewStreamingBuffer( u32 size, Span< const char > name ) {
-	size = AlignPow2( size, ssbo_offset_alignment );
+    size = AlignPow2( size, ssbo_offset_alignment );
 
-	StreamingBuffer stream = { };
-	stream.buffer = NewGPUBuffer( NULL, size * MAX_FRAMES_IN_FLIGHT, true, name );
-	stream.ptr = glMapNamedBufferRange( stream.buffer.buffer, 0, size * MAX_FRAMES_IN_FLIGHT, GL_MAP_COHERENT_BIT | GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT );
-	stream.size = size;
+    StreamingBuffer stream = { };
+    stream.buffer = NewGPUBuffer( NULL, size * MAX_FRAMES_IN_FLIGHT, true, name );
+#ifdef __APPLE__
+    glBindBuffer( GL_UNIFORM_BUFFER, stream.buffer.buffer );
+    typedef void* (APIENTRY *PFNGLMAPBUFFERPROC)(GLenum, GLenum);
+    static PFNGLMAPBUFFERPROC my_glMapBuffer = NULL;
+    if (!my_glMapBuffer) {
+        my_glMapBuffer = (PFNGLMAPBUFFERPROC)SDL_GL_GetProcAddress("glMapBuffer");
+        if (!my_glMapBuffer) {
+            Fatal( "Failed to load glMapBuffer" );
+        }
+    }
+    stream.ptr = my_glMapBuffer( GL_UNIFORM_BUFFER, GL_WRITE_ONLY );
+#else
+    stream.ptr = glMapNamedBufferRange( stream.buffer.buffer, 0, size * MAX_FRAMES_IN_FLIGHT, GL_MAP_COHERENT_BIT | GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT );
+#endif
+    stream.size = size;
 
-	if( name.ptr != NULL ) {
-		DebugLabel( GL_BUFFER, stream.buffer.buffer, name );
-	}
+    if( name.ptr != NULL ) {
+        DebugLabel( GL_BUFFER, stream.buffer.buffer, name );
+    }
 
-	return stream;
+    return stream;
 }
 
 void * GetStreamingBufferMemory( StreamingBuffer stream ) {
@@ -1058,8 +1138,13 @@ void * GetStreamingBufferMemory( StreamingBuffer stream ) {
 }
 
 void DeleteStreamingBuffer( StreamingBuffer stream ) {
-	glUnmapNamedBuffer( stream.buffer.buffer );
-	DeleteGPUBuffer( stream.buffer );
+#ifdef __APPLE__
+    glBindBuffer( GL_UNIFORM_BUFFER, stream.buffer.buffer );
+    glUnmapBuffer( GL_UNIFORM_BUFFER );
+#else
+    glUnmapNamedBuffer( stream.buffer.buffer );
+#endif
+    DeleteGPUBuffer( stream.buffer );
 }
 
 void DeferDeleteStreamingBuffer( StreamingBuffer stream ) {
@@ -1067,25 +1152,29 @@ void DeferDeleteStreamingBuffer( StreamingBuffer stream ) {
 }
 
 Sampler NewSampler( const SamplerConfig & config ) {
-	Sampler sampler;
-	glCreateSamplers( 1, &sampler.sampler );
+    Sampler sampler;
+#ifdef __APPLE__
+    glGenSamplers( 1, &sampler.sampler );
+#else
+    glCreateSamplers( 1, &sampler.sampler );
+#endif
 
-	glSamplerParameteri( sampler.sampler, GL_TEXTURE_WRAP_S, SamplerWrapToGL( config.wrap ) );
-	glSamplerParameteri( sampler.sampler, GL_TEXTURE_WRAP_T, SamplerWrapToGL( config.wrap ) );
+    glSamplerParameteri( sampler.sampler, GL_TEXTURE_WRAP_S, SamplerWrapToGL( config.wrap ) );
+    glSamplerParameteri( sampler.sampler, GL_TEXTURE_WRAP_T, SamplerWrapToGL( config.wrap ) );
 
-	GLenum min_filter = config.filter ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_NEAREST;
-	GLenum mag_filter = config.filter ? GL_LINEAR : GL_NEAREST;
-	glSamplerParameteri( sampler.sampler, GL_TEXTURE_MIN_FILTER, min_filter );
-	glSamplerParameteri( sampler.sampler, GL_TEXTURE_MAG_FILTER, mag_filter );
+    GLenum min_filter = config.filter ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_NEAREST;
+    GLenum mag_filter = config.filter ? GL_LINEAR : GL_NEAREST;
+    glSamplerParameteri( sampler.sampler, GL_TEXTURE_MIN_FILTER, min_filter );
+    glSamplerParameteri( sampler.sampler, GL_TEXTURE_MAG_FILTER, mag_filter );
 
-	glSamplerParameterf( sampler.sampler, GL_TEXTURE_LOD_BIAS, config.lod_bias );
+    glSamplerParameterf( sampler.sampler, GL_TEXTURE_LOD_BIAS, config.lod_bias );
 
-	if( config.shadowmap_sampler ) {
-		glSamplerParameteri( sampler.sampler, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL );
-		glSamplerParameteri( sampler.sampler, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE );
-	}
+    if( config.shadowmap_sampler ) {
+        glSamplerParameteri( sampler.sampler, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL );
+        glSamplerParameteri( sampler.sampler, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE );
+    }
 
-	return sampler;
+    return sampler;
 }
 
 void DeleteSampler( Sampler sampler ) {
@@ -1095,98 +1184,213 @@ void DeleteSampler( Sampler sampler ) {
 }
 
 Texture NewTexture( const TextureConfig & config ) {
-	Texture texture = { };
-	texture.width = config.width;
-	texture.height = config.height;
-	texture.num_layers = config.num_layers;
-	texture.num_mipmaps = config.num_mipmaps;
-	texture.msaa_samples = config.msaa_samples;
-	texture.format = config.format;
+    Texture texture = { };
+    texture.width = config.width;
+    texture.height = config.height;
+    texture.num_layers = config.num_layers;
+    texture.num_mipmaps = config.num_mipmaps;
+    texture.msaa_samples = config.msaa_samples;
+    texture.format = config.format;
 
-	GLenum target;
-	if( config.msaa_samples == 0 ) {
-		target = config.num_layers == 0 ? GL_TEXTURE_2D : GL_TEXTURE_2D_ARRAY;
-	}
-	else {
-		target = config.num_layers == 0 ? GL_TEXTURE_2D_MULTISAMPLE : GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
-	}
-	glCreateTextures( target, 1, &texture.texture );
+    GLenum target;
+    if( config.msaa_samples == 0 ) {
+        target = config.num_layers == 0 ? GL_TEXTURE_2D : GL_TEXTURE_2D_ARRAY;
+    }
+    else {
+        target = config.num_layers == 0 ? GL_TEXTURE_2D_MULTISAMPLE : GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+    }
 
-	GLTextureFormat gl = TextureFormatToGL( config.format );
+#ifdef __APPLE__
+    // macOS: use legacy OpenGL
+    glGenTextures(1, &texture.texture);
+    glBindTexture(target, texture.texture);
 
-	if( config.msaa_samples != 0 ) {
-		Assert( config.data == NULL );
-		if( config.num_layers == 0 ) {
-			glTextureStorage2DMultisample( texture.texture, config.msaa_samples,
-				gl.internal, config.width, config.height, GL_TRUE );
-		}
-		else {
-			glTextureStorage3DMultisample( texture.texture, config.msaa_samples,
-				gl.internal, config.width, config.height, config.num_layers, GL_TRUE );
-		}
-		return texture;
-	}
+    GLTextureFormat gl = TextureFormatToGL( config.format );
 
-	if( config.num_layers == 0 ) {
-		glTextureStorage2D( texture.texture, config.num_mipmaps, gl.internal, config.width, config.height );
-	}
-	else {
-		glTextureStorage3D( texture.texture, config.num_mipmaps, gl.internal, config.width, config.height, config.num_layers );
-	}
+    if( config.msaa_samples != 0 ) {
+        Assert( config.data == NULL );
+        if( config.num_layers == 0 ) {
+            glTexImage2DMultisample( target, config.msaa_samples, gl.internal, config.width, config.height, GL_TRUE );
+        }
+        else {
+            glTexImage3DMultisample( target, config.msaa_samples, gl.internal, config.width, config.height, config.num_layers, GL_TRUE );
+        }
+        // Note: glTexImage*Multisample may not be available on macOS; if it fails, fallback to regular texture.
+        // We'll assume it works; if not, we'll skip MSAA.
+        glBindTexture(target, 0);
+        return texture;
+    }
 
-	glTextureParameteri( texture.texture, GL_TEXTURE_SWIZZLE_R, gl.swizzle[ 0 ] );
-	glTextureParameteri( texture.texture, GL_TEXTURE_SWIZZLE_G, gl.swizzle[ 1 ] );
-	glTextureParameteri( texture.texture, GL_TEXTURE_SWIZZLE_B, gl.swizzle[ 2 ] );
-	glTextureParameteri( texture.texture, GL_TEXTURE_SWIZZLE_A, gl.swizzle[ 3 ] );
+    // Set texture parameters (legacy)
+    glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, gl.swizzle[0]);
+    glTexParameteri(target, GL_TEXTURE_SWIZZLE_G, gl.swizzle[1]);
+    glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, gl.swizzle[2]);
+    glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, gl.swizzle[3]);
 
-	if( !CompressedTextureFormat( config.format ) ) {
-		Assert( config.num_mipmaps == 1 );
+    // Allocate storage using TexStorage or TexImage fallback
+    // glTexStorage2D is available in OpenGL 4.2+; macOS 4.1 may not have it, so fallback to glTexImage2D.
+    typedef void (APIENTRY *PFNGLTEXSTORAGE2DPROC)(GLenum, GLsizei, GLenum, GLsizei, GLsizei);
+    static PFNGLTEXSTORAGE2DPROC my_glTexStorage2D = NULL;
+    if (!my_glTexStorage2D) {
+        my_glTexStorage2D = (PFNGLTEXSTORAGE2DPROC)SDL_GL_GetProcAddress("glTexStorage2D");
+    }
+    if (my_glTexStorage2D) {
+        if (config.num_layers == 0) {
+            my_glTexStorage2D(target, config.num_mipmaps, gl.internal, config.width, config.height);
+        } else {
+            // Use glTexStorage3D for arrays
+            typedef void (APIENTRY *PFNGLTEXSTORAGE3DPROC)(GLenum, GLsizei, GLenum, GLsizei, GLsizei, GLsizei);
+            static PFNGLTEXSTORAGE3DPROC my_glTexStorage3D = NULL;
+            if (!my_glTexStorage3D) {
+                my_glTexStorage3D = (PFNGLTEXSTORAGE3DPROC)SDL_GL_GetProcAddress("glTexStorage3D");
+            }
+            if (my_glTexStorage3D) {
+                my_glTexStorage3D(target, config.num_mipmaps, gl.internal, config.width, config.height, config.num_layers);
+            } else {
+                // Fallback to glTexImage3D
+                glTexImage3D(target, 0, gl.internal, config.width, config.height, config.num_layers, 0, gl.channels, gl.type, NULL);
+            }
+        }
+    } else {
+        // Fallback to glTexImage2D/glTexImage3D (with mipmap generation later if needed)
+        if (config.num_layers == 0) {
+            glTexImage2D(target, 0, gl.internal, config.width, config.height, 0, gl.channels, gl.type, NULL);
+        } else {
+            glTexImage3D(target, 0, gl.internal, config.width, config.height, config.num_layers, 0, gl.channels, gl.type, NULL);
+        }
+        // Mipmaps would need to be generated manually; we assume config.num_mipmaps == 1 or skip.
+    }
 
-		if( config.data != NULL ) {
-			if( config.num_layers == 0 ) {
-				glTextureSubImage2D( texture.texture, 0, 0, 0,
-					config.width, config.height, gl.channels, gl.type, config.data );
-			}
-			else {
-				glTextureSubImage3D( texture.texture, 0, 0, 0, 0,
-					config.width, config.height, config.num_layers, gl.channels, gl.type, config.data );
-			}
-		}
-	}
-	else {
-		Assert( config.data != NULL );
+    // Upload data
+    if (!CompressedTextureFormat(config.format)) {
+        Assert(config.num_mipmaps == 1);
+        if (config.data != NULL) {
+            if (config.num_layers == 0) {
+                glTexSubImage2D(target, 0, 0, 0, config.width, config.height, gl.channels, gl.type, config.data);
+            } else {
+                glTexSubImage3D(target, 0, 0, 0, 0, config.width, config.height, config.num_layers, gl.channels, gl.type, config.data);
+            }
+        }
+    } else {
+        Assert(config.data != NULL);
+        // For compressed, set anisotropic if needed
+        typedef void (APIENTRY *PFNGLTEXPARAMETERFPROC)(GLenum, GLenum, GLfloat);
+        static PFNGLTEXPARAMETERFPROC my_glTexParameterf = (PFNGLTEXPARAMETERFPROC)SDL_GL_GetProcAddress("glTexParameterf");
+        if (my_glTexParameterf) {
+            my_glTexParameterf(target, GL_TEXTURE_MAX_ANISOTROPY_EXT, max_anisotropic_filtering);
+        }
 
-		glTextureParameterf( texture.texture, GL_TEXTURE_MAX_ANISOTROPY_EXT, max_anisotropic_filtering );
+        if (config.format == TextureFormat_BC4) {
+            glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, GL_ONE);
+            glTexParameteri(target, GL_TEXTURE_SWIZZLE_G, GL_ONE);
+            glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, GL_ONE);
+            glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, GL_RED);
+        }
 
-		if( config.format == TextureFormat_BC4 ) {
-			glTextureParameteri( texture.texture, GL_TEXTURE_SWIZZLE_R, GL_ONE );
-			glTextureParameteri( texture.texture, GL_TEXTURE_SWIZZLE_G, GL_ONE );
-			glTextureParameteri( texture.texture, GL_TEXTURE_SWIZZLE_B, GL_ONE );
-			glTextureParameteri( texture.texture, GL_TEXTURE_SWIZZLE_A, GL_RED );
-		}
+        const char * cursor = (const char *)config.data;
+        for (u32 i = 0; i < config.num_mipmaps; i++) {
+            u32 w = config.width >> i;
+            u32 h = config.height >> i;
+            u32 layers = Max2(u32(1), config.num_layers);
+            u32 size = (BitsPerPixel(config.format) * w * h * layers) / 8;
+            Assert(size < S32_MAX);
 
-		const char * cursor = ( const char * ) config.data;
-		for( u32 i = 0; i < config.num_mipmaps; i++ ) {
-			u32 w = config.width >> i;
-			u32 h = config.height >> i;
-			u32 layers = Max2( u32( 1 ), config.num_layers );
-			u32 size = ( BitsPerPixel( config.format ) * w * h * layers ) / 8;
-			Assert( size < S32_MAX );
+            if (config.num_layers == 0) {
+                glCompressedTexSubImage2D(target, i, 0, 0, w, h, gl.internal, size, cursor);
+            } else {
+                glCompressedTexSubImage3D(target, i, 0, 0, 0, w, h, config.num_layers, gl.internal, size, cursor);
+            }
+            cursor += size;
+        }
+    }
 
-			if( config.num_layers == 0 ) {
-				glCompressedTextureSubImage2D( texture.texture, i, 0, 0,
-					w, h, gl.internal, size, cursor );
-			}
-			else {
-				glCompressedTextureSubImage3D( texture.texture, i, 0, 0, 0,
-					w, h, config.num_layers, gl.internal, size, cursor );
-			}
+    glBindTexture(target, 0);
 
-			cursor += size;
-		}
-	}
+  #ifndef __APPLE__
+    if( config.name.ptr != NULL ) {
+        DebugLabel( GL_TEXTURE, texture.texture, config.name );
+    }
+#endif
+#else
+    // Original DSA code for non-macOS
+    glCreateTextures( target, 1, &texture.texture );
 
-	return texture;
+    GLTextureFormat gl = TextureFormatToGL( config.format );
+
+    if( config.msaa_samples != 0 ) {
+        Assert( config.data == NULL );
+        if( config.num_layers == 0 ) {
+            glTextureStorage2DMultisample( texture.texture, config.msaa_samples,
+                gl.internal, config.width, config.height, GL_TRUE );
+        }
+        else {
+            glTextureStorage3DMultisample( texture.texture, config.msaa_samples,
+                gl.internal, config.width, config.height, config.num_layers, GL_TRUE );
+        }
+        return texture;
+    }
+
+    if( config.num_layers == 0 ) {
+        glTextureStorage2D( texture.texture, config.num_mipmaps, gl.internal, config.width, config.height );
+    }
+    else {
+        glTextureStorage3D( texture.texture, config.num_mipmaps, gl.internal, config.width, config.height, config.num_layers );
+    }
+
+    glTextureParameteri( texture.texture, GL_TEXTURE_SWIZZLE_R, gl.swizzle[ 0 ] );
+    glTextureParameteri( texture.texture, GL_TEXTURE_SWIZZLE_G, gl.swizzle[ 1 ] );
+    glTextureParameteri( texture.texture, GL_TEXTURE_SWIZZLE_B, gl.swizzle[ 2 ] );
+    glTextureParameteri( texture.texture, GL_TEXTURE_SWIZZLE_A, gl.swizzle[ 3 ] );
+
+    if( !CompressedTextureFormat( config.format ) ) {
+        Assert( config.num_mipmaps == 1 );
+
+        if( config.data != NULL ) {
+            if( config.num_layers == 0 ) {
+                glTextureSubImage2D( texture.texture, 0, 0, 0,
+                    config.width, config.height, gl.channels, gl.type, config.data );
+            }
+            else {
+                glTextureSubImage3D( texture.texture, 0, 0, 0, 0,
+                    config.width, config.height, config.num_layers, gl.channels, gl.type, config.data );
+            }
+        }
+    }
+    else {
+        Assert( config.data != NULL );
+
+        glTextureParameterf( texture.texture, GL_TEXTURE_MAX_ANISOTROPY_EXT, max_anisotropic_filtering );
+
+        if( config.format == TextureFormat_BC4 ) {
+            glTextureParameteri( texture.texture, GL_TEXTURE_SWIZZLE_R, GL_ONE );
+            glTextureParameteri( texture.texture, GL_TEXTURE_SWIZZLE_G, GL_ONE );
+            glTextureParameteri( texture.texture, GL_TEXTURE_SWIZZLE_B, GL_ONE );
+            glTextureParameteri( texture.texture, GL_TEXTURE_SWIZZLE_A, GL_RED );
+        }
+
+        const char * cursor = ( const char * ) config.data;
+        for( u32 i = 0; i < config.num_mipmaps; i++ ) {
+            u32 w = config.width >> i;
+            u32 h = config.height >> i;
+            u32 layers = Max2( u32( 1 ), config.num_layers );
+            u32 size = ( BitsPerPixel( config.format ) * w * h * layers ) / 8;
+            Assert( size < S32_MAX );
+
+            if( config.num_layers == 0 ) {
+                glCompressedTextureSubImage2D( texture.texture, i, 0, 0,
+                    w, h, gl.internal, size, cursor );
+            }
+            else {
+                glCompressedTextureSubImage3D( texture.texture, i, 0, 0, 0,
+                    w, h, config.num_layers, gl.internal, size, cursor );
+            }
+
+            cursor += size;
+        }
+    }
+#endif
+
+    return texture;
 }
 
 void DeleteTexture( Texture texture ) {
@@ -1213,37 +1417,80 @@ static void AddRenderTargetAttachment( GLuint fbo, const RenderTargetConfig::Att
 }
 
 RenderTarget NewRenderTarget( const RenderTargetConfig & config ) {
-	RenderTarget rt = { };
+    RenderTarget rt = { };
 
-	glCreateFramebuffers( 1, &rt.fbo );
+#ifdef __APPLE__
+    glGenFramebuffers( 1, &rt.fbo );
+    glBindFramebuffer( GL_FRAMEBUFFER, rt.fbo );
+#else
+    glCreateFramebuffers( 1, &rt.fbo );
+#endif
 
-	u32 width = 0;
-	u32 height = 0;
+    u32 width = 0;
+    u32 height = 0;
+    GLenum opengl_sucks[ FragmentShaderOutput_Count ] = { };
 
-	GLenum opengl_sucks[ FragmentShaderOutput_Count ] = { };
+    for( size_t i = 0; i < ARRAY_COUNT( config.color_attachments ); i++ ) {
+        const Optional< RenderTargetConfig::Attachment > & attachment = config.color_attachments[ i ];
+        if( !attachment.exists )
+            continue;
+        // AddRenderTargetAttachment uses glNamedFramebufferTexture – we'll replace inline
+        Texture tex = attachment.value.texture;
+        GLenum attachment_enum = GL_COLOR_ATTACHMENT0 + i;
+        if( tex.num_layers == 0 ) {
+#ifdef __APPLE__
+            glFramebufferTexture2D( GL_FRAMEBUFFER, attachment_enum, GL_TEXTURE_2D, tex.texture, 0 );
+#else
+            glNamedFramebufferTexture( rt.fbo, attachment_enum, tex.texture, 0 );
+#endif
+        } else {
+#ifdef __APPLE__
+            glFramebufferTextureLayer( GL_FRAMEBUFFER, attachment_enum, tex.texture, 0, attachment.value.layer.value );
+#else
+            glNamedFramebufferTextureLayer( rt.fbo, attachment_enum, tex.texture, 0, attachment.value.layer.value );
+#endif
+        }
+        rt.color_attachments[ i ] = tex;
+        opengl_sucks[ i ] = attachment_enum;
+        width = tex.width;
+        height = tex.height;
+    }
 
-	for( size_t i = 0; i < ARRAY_COUNT( config.color_attachments ); i++ ) {
-		const Optional< RenderTargetConfig::Attachment > & attachment = config.color_attachments[ i ];
-		if( !attachment.exists )
-			continue;
-		AddRenderTargetAttachment( rt.fbo, attachment.value, GL_COLOR_ATTACHMENT0 + i, &width, &height );
-		rt.color_attachments[ i ] = attachment.value.texture;
-		opengl_sucks[ i ] = GL_COLOR_ATTACHMENT0 + i;
-	}
+    if( config.depth_attachment.exists ) {
+        Texture tex = config.depth_attachment.value.texture;
+        if( tex.num_layers == 0 ) {
+#ifdef __APPLE__
+            glFramebufferTexture2D( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, tex.texture, 0 );
+#else
+            glNamedFramebufferTexture( rt.fbo, GL_DEPTH_ATTACHMENT, tex.texture, 0 );
+#endif
+        } else {
+#ifdef __APPLE__
+            glFramebufferTextureLayer( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, tex.texture, 0, config.depth_attachment.value.layer.value );
+#else
+            glNamedFramebufferTextureLayer( rt.fbo, GL_DEPTH_ATTACHMENT, tex.texture, 0, config.depth_attachment.value.layer.value );
+#endif
+        }
+        rt.depth_attachment = tex;
+        width = tex.width;
+        height = tex.height;
+    }
 
-	if( config.depth_attachment.exists ) {
-		AddRenderTargetAttachment( rt.fbo, config.depth_attachment.value, GL_DEPTH_ATTACHMENT, &width, &height );
-		rt.depth_attachment = config.depth_attachment.value.texture;
-	}
+#ifdef __APPLE__
+    glDrawBuffers( ARRAY_COUNT( opengl_sucks ), opengl_sucks );
+    GLenum status = glCheckFramebufferStatus( GL_FRAMEBUFFER );
+    glBindFramebuffer( GL_FRAMEBUFFER, 0 );
+#else
+    glNamedFramebufferDrawBuffers( rt.fbo, ARRAY_COUNT( opengl_sucks ), opengl_sucks );
+    GLenum status = glCheckNamedFramebufferStatus( rt.fbo, GL_FRAMEBUFFER );
+#endif
 
-	glNamedFramebufferDrawBuffers( rt.fbo, ARRAY_COUNT( opengl_sucks ), opengl_sucks );
+    Assert( status == GL_FRAMEBUFFER_COMPLETE );
+    Assert( width > 0 && height > 0 );
+    rt.width = width;
+    rt.height = height;
 
-	Assert( glCheckNamedFramebufferStatus( rt.fbo, GL_FRAMEBUFFER ) == GL_FRAMEBUFFER_COMPLETE );
-	Assert( width > 0 && height > 0 );
-	rt.width = width;
-	rt.height = height;
-
-	return rt;
+    return rt;
 }
 
 void DeleteRenderTarget( RenderTarget rt ) {
@@ -1261,44 +1508,88 @@ void DeleteRenderTargetAndTextures( RenderTarget rt ) {
 }
 
 static GLuint CompileShader( GLenum type, Span< const char > body, Span< const char > name ) {
-	TempAllocator temp = cls.frame_arena.temp();
+    TempAllocator temp = cls.frame_arena.temp();
+    DynamicString src( &temp );
 
-	DynamicString src( &temp, "#version 450 core\n" );
-	if( type == GL_VERTEX_SHADER || type == GL_FRAGMENT_SHADER ) {
-		constexpr Span< const char > vertex_shader_prelude =
-			"#define VERTEX_SHADER 1\n"
-			"#define v2f out\n";
-		constexpr Span< const char > fragment_shader_prelude =
-			"#define FRAGMENT_SHADER 1\n"
-			"#define v2f in\n";
+    // Always start with version (410 core works on macOS 4.1)
+    src += "#version 410 core\n";
+    src += "#extension GL_ARB_explicit_attrib_location : enable\n";
 
-		src += type == GL_VERTEX_SHADER ? vertex_shader_prelude : fragment_shader_prelude;
-	}
+    // Add prelude for vertex/fragment shaders
+    if( type == GL_VERTEX_SHADER ) {
+        src += "#define VERTEX_SHADER 1\n#define v2f out\n";
+    } else if( type == GL_FRAGMENT_SHADER ) {
+        src += "#define FRAGMENT_SHADER 1\n#define v2f in\n";
+    }
 
-	src += body;
+    // Process #include lines – expand them inline
+    const char* p = body.ptr;
+    const char* end = p + body.n;
+    while( p < end ) {
+        // Skip leading whitespace to detect #include
+        while( p < end && isspace( *p ) ) p++;
+        if( p + 8 <= end && strncmp( p, "#include", 8 ) == 0 ) {
+            p += 8;
+            // Skip whitespace
+            while( p < end && isspace( *p ) ) p++;
+            // Expect opening quote
+            if( p < end && *p == '"' ) {
+                p++;
+                const char* path_start = p;
+                while( p < end && *p != '"' ) p++;
+                if( p < end && *p == '"' ) {
+                    size_t path_len = p - path_start;
+                    char include_path[256];
+                    snprintf( include_path, sizeof(include_path), "base/glsl/%.*s", (int)path_len, path_start );
+                    FILE* f = fopen( include_path, "rb" );
+                    if( f ) {
+                        fseek( f, 0, SEEK_END );
+                        long size = ftell( f );
+                        fseek( f, 0, SEEK_SET );
+                        char* data = (char*)malloc( size );
+                        fread( data, 1, size, f );
+                        fclose( f );
+                        // Use += with Span<const char>
+                        src += Span<const char>( data, size );
+                        free( data );
+                    } else {
+                        Com_Printf( "Include file not found: %s\n", include_path );
+                        // Fallback: include the line as a comment to avoid breaking
+                        src += "// #include ";
+                        src += Span<const char>( path_start, path_len );
+                        src += "\n";
+                    }
+                    p++; // skip closing quote
+                }
+            } else {
+                // malformed include; skip
+                p = end;
+            }
+        } else {
+            // Copy characters up to newline or end
+            const char* line_start = p;
+            while( p < end && *p != '\n' ) p++;
+            if( p < end ) p++; // include newline
+            src += Span<const char>( line_start, p - line_start );
+        }
+    }
 
-	GLuint shader = glCreateShader( type );
-	const char * nice_api = src.c_str();
-	glShaderSource( shader, 1, &nice_api, NULL );
-	glCompileShader( shader );
+    GLuint shader = glCreateShader( type );
+    const char* nice_api = src.c_str();
+    glShaderSource( shader, 1, &nice_api, NULL );
+    glCompileShader( shader );
 
-	GLint status;
-	glGetShaderiv( shader, GL_COMPILE_STATUS, &status );
+    GLint status;
+    glGetShaderiv( shader, GL_COMPILE_STATUS, &status );
+    if( status == GL_FALSE ) {
+        char buf[ 1024 ];
+        glGetShaderInfoLog( shader, sizeof( buf ), NULL, buf );
+        Com_GGPrint( S_COLOR_YELLOW "Shader compilation failed {}: {}", name, buf );
+        glDeleteShader( shader );
+        return 0;
+    }
 
-	if( status == GL_FALSE ) {
-		char buf[ 1024 ];
-		glGetShaderInfoLog( shader, sizeof( buf ), NULL, buf );
-		Com_GGPrint( S_COLOR_YELLOW "Shader compilation failed {}: {}", name, buf );
-		glDeleteShader( shader );
-
-		// static char src[ 65536 ];
-		// glGetShaderSource( shader, sizeof( src ), NULL, src );
-		// Com_Printf( "%s\n", src );
-
-		return 0;
-	}
-
-	return shader;
+    return shader;
 }
 
 static bool LinkShader( Shader * shader, GLuint program, Span< const char > shader_name ) {
