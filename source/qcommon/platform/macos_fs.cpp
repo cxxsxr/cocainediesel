@@ -49,8 +49,9 @@ void DeleteFSChangeMonitor( Allocator * a, FSChangeMonitor * monitor ) {
 }
 
 Span< const char * > PollFSChangeMonitor( TempAllocator * temp, FSChangeMonitor * monitor, const char ** results, size_t n ) {
-	Fatal( "not implemented" );
-	return { };
+    // Stub: no file change monitoring on macOS.
+    (void)temp; (void)monitor; (void)results; (void)n;
+    return { };
 }
 
 #endif // #if PLATFORM_MACOS
