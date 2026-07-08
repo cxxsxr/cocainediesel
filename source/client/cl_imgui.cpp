@@ -10,19 +10,22 @@
 #include "client/assets.h"
 #include "client/renderer/renderer.h"
 
+#include <cstdio>
+#include <cstdlib>
+#include <cerrno>
+#include <unistd.h>
+
 #include <algorithm>
 
 static Texture atlas_texture;
 static Material atlas_material;
 
-static ImFont * AddFontAsset( StringHash path, float pixel_size ) {
-	Span< const u8 > data = AssetBinary( path );
-	ImFontConfig config;
-	config.FontData = ( void * ) data.ptr;
-	config.FontDataOwnedByAtlas = false;
-	config.FontDataSize = data.n;
-	config.SizePixels = pixel_size;
-	return ImGui::GetIO().Fonts->AddFont( &config );
+static ImFont * AddFontAsset( const char * path, float pixel_size ) {
+    ImFont* font = ImGui::GetIO().Fonts->AddFontFromFileTTF(path, pixel_size);
+    if (!font) {
+        Com_Printf("Failed to load font from file: %s\n", path);
+    }
+    return font;
 }
 
 struct SDL_Window;
@@ -42,34 +45,55 @@ void CL_InitImGui() {
 
 	float scale = GetContentScale();
 
-	{
-		AddFontAsset( "fonts/Decalotype-Bold.ttf", 18.0f * scale );
-		cls.huge_font = AddFontAsset( "fonts/Decalotype-Black.ttf", 128.0f * scale );
-		cls.huge_italic_font = AddFontAsset( "fonts/Decalotype-BlackItalic.ttf", 128.0f * scale );
-		cls.large_font = AddFontAsset( "fonts/Decalotype-Black.ttf", 64.0f * scale );
-		cls.big_font = AddFontAsset( "fonts/Decalotype-Black.ttf", 48.0f * scale );
-		cls.medium_font = AddFontAsset( "fonts/Decalotype-Black.ttf", 28.0f * scale );
-		cls.medium_italic_font = AddFontAsset( "fonts/Decalotype-BlackItalic.ttf", 28.0f * scale );
-		cls.big_italic_font = AddFontAsset( "fonts/Decalotype-BlackItalic.ttf", 48.0f * scale );
-		cls.large_italic_font = AddFontAsset( "fonts/Decalotype-BlackItalic.ttf", 64.0f * scale );
-		cls.console_font = AddFontAsset( "fonts/Decalotype-Bold.ttf", 14.0f * scale );
-		cls.license_italic_font = AddFontAsset( "fonts/sofachrome-rg-it.otf", 128.0f * scale );
+{
+    // Try to load custom fonts; if any fail, fall back to default.
+    bool any_font_loaded = false;
+    if (AddFontAsset("base/fonts/Decalotype-Bold.ttf", 18.0f * scale)) any_font_loaded = true;
+    cls.huge_font = AddFontAsset("base/fonts/Decalotype-Black.ttf", 128.0f * scale);
+    if (cls.huge_font) any_font_loaded = true;
+    cls.huge_italic_font = AddFontAsset("base/fonts/Decalotype-BlackItalic.ttf", 128.0f * scale);
+    if (cls.huge_italic_font) any_font_loaded = true;
+    cls.large_font = AddFontAsset("base/fonts/Decalotype-Black.ttf", 64.0f * scale);
+    if (cls.large_font) any_font_loaded = true;
+    cls.big_font = AddFontAsset("base/fonts/Decalotype-Black.ttf", 48.0f * scale);
+    if (cls.big_font) any_font_loaded = true;
+    cls.medium_font = AddFontAsset("base/fonts/Decalotype-Black.ttf", 28.0f * scale);
+    if (cls.medium_font) any_font_loaded = true;
+    cls.medium_italic_font = AddFontAsset("base/fonts/Decalotype-BlackItalic.ttf", 28.0f * scale);
+    if (cls.medium_italic_font) any_font_loaded = true;
+    cls.big_italic_font = AddFontAsset("base/fonts/Decalotype-BlackItalic.ttf", 48.0f * scale);
+    if (cls.big_italic_font) any_font_loaded = true;
+    cls.large_italic_font = AddFontAsset("base/fonts/Decalotype-BlackItalic.ttf", 64.0f * scale);
+    if (cls.large_italic_font) any_font_loaded = true;
+    cls.console_font = AddFontAsset("base/fonts/Decalotype-Bold.ttf", 14.0f * scale);
+    if (cls.console_font) any_font_loaded = true;
+    cls.license_italic_font = AddFontAsset("base/fonts/sofachrome-rg-it.otf", 128.0f * scale);
+    if (cls.license_italic_font) any_font_loaded = true;
+// After loading all fonts, if no font was loaded, add a default one.
+if (ImGui::GetIO().Fonts->Fonts.Size == 0) {
+    ImGui::GetIO().Fonts->AddFontDefault();
+}
+    // If no fonts loaded, add a default ImGui font
+    if (!any_font_loaded) {
+        Com_Printf("Warning: No custom fonts loaded; using ImGui default font.\n");
+        ImGui::GetIO().Fonts->AddFontDefault();
+    }
 
-		io.Fonts->Build();
+    io.Fonts->Build();
 
-		u8 * pixels;
-		int width, height;
-		io.Fonts->GetTexDataAsAlpha8( &pixels, &width, &height );
+    u8 * pixels;
+    int width, height;
+    io.Fonts->GetTexDataAsAlpha8( &pixels, &width, &height );
 
-		atlas_texture = NewTexture( TextureConfig {
-			.format = TextureFormat_A_U8,
-			.width = checked_cast< u32 >( width ),
-			.height = checked_cast< u32 >( height ),
-			.data = pixels,
-		} );
-		atlas_material.texture = &atlas_texture;
-		io.Fonts->TexID = ImGuiShaderAndMaterial( &atlas_material );
-	}
+    atlas_texture = NewTexture( TextureConfig {
+        .format = TextureFormat_A_U8,
+        .width = checked_cast< u32 >( width ),
+        .height = checked_cast< u32 >( height ),
+        .data = pixels,
+    } );
+    atlas_material.texture = &atlas_texture;
+    io.Fonts->TexID = ImGuiShaderAndMaterial( &atlas_material );
+}
 
 	{
 		ImGuiStyle & style = ImGui::GetStyle();
